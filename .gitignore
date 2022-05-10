@@ -1,0 +1,12 @@
+
+.vscode
+
+# NodeJS API
+api/node_modules
+api/.env
+
+# Solidity/Hardhat files
+smart-contracts/node_modules
+smart-contracts/artifacts
+smart-contracts/build
+smart-contracts/cache
