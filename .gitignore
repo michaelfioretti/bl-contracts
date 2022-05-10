@@ -1,12 +1,16 @@
 
 .vscode
+.DS_Store
+
 
 # NodeJS API
 api/node_modules
 api/.env
+api/.DS_Store
 
 # Solidity/Hardhat files
 smart-contracts/node_modules
 smart-contracts/artifacts
 smart-contracts/build
 smart-contracts/cache
+smart-contracts/.DS_Store
