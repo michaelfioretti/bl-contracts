@@ -14,6 +14,16 @@ import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
 contract EscrowService is Ownable, ReentrancyGuard {
     /* ======== EVENTS ======== */
 
+    // Emitted when an escrow is created
+    event created(
+        address indexed source,
+        address indexed destination,
+        uint256 indexed created,
+        uint256 timeHorizon,
+        uint256 amountInEscrow,
+        uint256 escrowIndex
+    );
+
     // Emitted when escrow is fully funded and ready to send to receiver
     event funded(
         address indexed source,
@@ -33,7 +43,7 @@ contract EscrowService is Ownable, ReentrancyGuard {
     );
 
     // Emitted when an escrow's horizon expires
-    event refund(
+    event refunded(
         address indexed source,
         address indexed destination,
         uint256 indexed created,
@@ -41,18 +51,18 @@ contract EscrowService is Ownable, ReentrancyGuard {
         uint256 amountInEscrow
     );
 
-    uint256 total; // Total amount of ETH in wei
-    address destination; // Receiver address
-    uint256 timeHorizon; // Time in seconds that the escrow will exist before being refunded
-    uint256 amountInEscrow; // The current amount of ETH in the escrow
-    uint256 created; // Epoch when escrow was created
+    event newAdmin(
+        address indexed newAdmin,
+        uint256 indexed transferAt
+    );
 
     /* ======== STRUCTS ======== */
 
     // Define an escrow
     struct Escrow {
-        uint256 total; // Total amount of ETH in wei
+        address source; // Originator
         address destination; // Receiver address
+        uint256 total; // Total amount of ETH in wei
         uint256 timeHorizon; // Time in seconds that the escrow will exist before being refunded
         uint256 amountInEscrow; // The current amount of ETH in the escrow
         uint256 created; // Epoch when escrow was created
@@ -60,10 +70,19 @@ contract EscrowService is Ownable, ReentrancyGuard {
 
     /* ======== STATE VARIABLES ======== */
 
-    mapping(address => Escrow) public activeEscrows;
+    Escrow[] public activeEscrows;
+    address public admin;
 
-    constructor() {
+    constructor(address _admin) {
         require(msg.sender != address(0));
+        require(_admin != address(0));
+        admin = _admin;
+    }
+
+    function transferAdmin(address _newAdmin) onlyAdmin public {
+        require(_newAdmin != address(0));
+        admin = _newAdmin;
+        emit newAdmin(_newAdmin, block.timestamp);
     }
 
     /**
@@ -78,7 +97,7 @@ contract EscrowService is Ownable, ReentrancyGuard {
         address _destination,
         uint256 _total,
         uint256 _timeHorizon
-    ) external onlyOwner nonReentrant {
+    ) external nonReentrant returns (uint256) {
         require(_total > 0, "Escrow: Total cannot be 0");
         require(
             _destination != address(0),
@@ -87,61 +106,77 @@ contract EscrowService is Ownable, ReentrancyGuard {
         require(_timeHorizon > 0, "Escrow: Time horizon cannot be 0");
 
         // Now that we have validated, we will store the escrow
-        activeEscrows[_source] = Escrow({
-            total: _total,
-            destination: _destination,
-            timeHorizon: _timeHorizon,
-            amountInEscrow: 0,
-            created: block.timestamp
-        });
+        activeEscrows.push(
+            Escrow({
+                source: _source,
+                destination: _destination,
+                total: _total,
+                timeHorizon: _timeHorizon,
+                amountInEscrow: 0,
+                created: block.timestamp
+            })
+        );
+
+        emit created(
+            _source,
+            _destination,
+            block.timestamp,
+            _timeHorizon,
+            0,
+            activeEscrows.length - 1
+        );
+
+        return activeEscrows.length - 1;
     }
 
-    function fundEscrow() public payable nonReentrant {
+    event isItExpired(bool expired);
+
+    function fundEscrow(uint256 _escrowIndex) public payable nonReentrant {
         require(msg.sender != address(0));
 
-        Escrow storage escrow = activeEscrows[msg.sender];
+        if (escrowHasExpired(_escrowIndex)) {
+            return issueRefund(_escrowIndex);
+        }
+
+        Escrow storage escrow = activeEscrows[_escrowIndex];
+
         require(escrow.total > 0, "Escrow: No active escrow for msg.sender");
         require(
             escrow.destination != address(0),
             "Escrow: No active escrow for msg.sender"
         );
 
-        require(escrow.amountInEscrow < escrow.total, "Escrow: Already fully funded");
+        require(
+            escrow.amountInEscrow < escrow.total,
+            "Escrow: Already fully funded"
+        );
 
-        // Now that the escrow has been loaded in, we will add the funds
-        // that the user is sending to the escrow, emitting the 'funded' event
-        // if it equals or exceeds the escrow's total
-        if (escrowHasExpired(msg.sender)) {
-            issueRefund(msg.sender);
-        } else {
-            // Add the funds to the escrow
-            require(msg.value > 0, "Escrow: Cannot fund escrow with 0 ETH");
-            escrow.amountInEscrow += msg.value;
-            if (escrow.amountInEscrow > escrow.total) {
-                // Escrow is funded and ready to be sent to the destination
-                emit funded(
-                    msg.sender,
-                    escrow.destination,
-                    escrow.created,
-                    escrow.timeHorizon,
-                    escrow.amountInEscrow
-                );
-            }
+        require(msg.value > 0, "Escrow: Cannot fund escrow with 0 ETH");
+
+        escrow.amountInEscrow += msg.value;
+        if (escrow.amountInEscrow >= escrow.total) {
+            // Escrow is funded and ready to be sent to the destination
+            emit funded(
+                msg.sender,
+                escrow.destination,
+                escrow.created,
+                escrow.timeHorizon,
+                escrow.amountInEscrow
+            );
         }
     }
 
     /**
         @notice Releases a completed escrow to the destination address
-        @param _source The source address of the escrow account
+        @param _escrowIndex The index of the active escrow
     */
-    function releaseEscrow(address _source)
+    function releaseEscrow(uint256 _escrowIndex)
         public
-        onlyOwner
+        onlyAdmin
         nonReentrant
-        isSourceValid(_source)
-        refundOnExpired(_source)
+        refundOnExpired(_escrowIndex)
     {
-        Escrow storage escrow = activeEscrows[_source];
+        Escrow storage escrow = activeEscrows[_escrowIndex];
         require(
             escrow.amountInEscrow >= escrow.total,
             "Escrow: Escrow total has not been met yet"
@@ -161,23 +196,26 @@ contract EscrowService is Ownable, ReentrancyGuard {
         payable(escrow.destination).transfer(amount);
 
         emit completed(
-            _source,
+            escrow.source,
             escrow.destination,
             escrow.created,
             escrow.timeHorizon,
             escrow.amountInEscrow
         );
 
-        delete activeEscrows[_source];
+        removeEscrowFromMap(_escrowIndex);
     }
 
-    function rejectEscrow(address _source)
-        public
-        onlyOwner
-        nonReentrant
-        isSourceValid(_source)
-    {
-        issueRefund(_source);
+    function rejectEscrow(uint256 _escrowIndex) public onlyAdmin nonReentrant {
+        issueRefund(_escrowIndex);
+    }
+
+    function refundAllExpiredEscrows() public onlyAdmin {
+        for (uint256 i = 0; i < activeEscrows.length; i++) {
+            if (escrowHasExpired(i)) {
+                issueRefund(i);
+            }
+        }
     }
 
     /* ======== CUSTOM MODIFIER FUNCTIONS ======== */
@@ -194,41 +232,50 @@ contract EscrowService is Ownable, ReentrancyGuard {
         @notice Checks an escrow to see if it has expired. If it has, then it
         will refund the _source address. Otherwise it will continue 
     */
-    modifier refundOnExpired(address _source) {
-        if (escrowHasExpired(_source)) {
-            issueRefund(_source);
+    modifier refundOnExpired(uint256 _escrowIndex) {
+        if (escrowHasExpired(_escrowIndex)) {
+            issueRefund(_escrowIndex);
         } else {
             _;
         }
     }
 
+    modifier onlyAdmin() {
+        require(msg.sender == admin, "Escrow: User is not admin");
+        _;
+    }
+
     /* ======== INTERNAL HELPER FUNCTIONS ======== */
 
-    /**
-     *  @notice Checks to see if an escrow has expired
-     *  @param _source  The source address for the escrow
-     *  @return bool
-     */
-    function escrowHasExpired(address _source) internal view returns (bool) {
-        Escrow storage escrow = activeEscrows[_source];
+    function escrowHasExpired(uint256 _escrowIndex)
+        internal
+        view
+        returns (bool)
+    {
+        Escrow storage escrow = activeEscrows[_escrowIndex];
         uint256 currentTime = block.timestamp;
         return (currentTime -= escrow.created) > escrow.timeHorizon;
     }
 
-    function issueRefund(address _source) internal {
-        Escrow memory escrow = activeEscrows[_source];
+    function issueRefund(uint256 _escrowIndex) internal {
+        Escrow memory escrow = activeEscrows[_escrowIndex];
         uint256 amount = escrow.amountInEscrow;
         escrow.amountInEscrow = 0;
         payable(msg.sender).transfer(amount);
 
-        emit refund(
+        removeEscrowFromMap(_escrowIndex);
+
+        emit refunded(
             msg.sender,
             escrow.destination,
             escrow.created,
             escrow.timeHorizon,
             amount
         );
+    }
 
-        delete activeEscrows[msg.sender];
+    function removeEscrowFromMap(uint256 _index) internal {
+        require(activeEscrows.length > _index, "Escrow: Attempting to remove escrow will result in ut of bounds error");
+        delete activeEscrows[_index];
     }
 }

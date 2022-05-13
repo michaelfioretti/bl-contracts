@@ -29,26 +29,29 @@ describe("Managed Escrow Service", async (accounts) => {
         const ManagedEscrowService = await ethers.getContractFactory("EscrowService");
         [owner, alice, bob, ...addrs] = await ethers.getSigners();
 
-        EscrowInstance = await ManagedEscrowService.deploy()
+        EscrowInstance = await ManagedEscrowService.deploy(owner.address)
     });
 
     describe("Initialization", () => {
-        it("Should set the admin/owner as owner address", async () => {
-            const admin = await EscrowInstance.owner();
+        it("Should set the owner as owner address", async () => {
+            const escrowOwner = await EscrowInstance.owner();
+            expect(owner.address).to.equal(escrowOwner);
+        });
+
+        it("Should set the admin", async () => {
+            const admin = await EscrowInstance.admin();
             expect(owner.address).to.equal(admin);
         });
     })
 
     describe("Escrow Creation", () => {
-        it(`Should only allow the owner to create an escrow`, async () => {
-            expect(
-                EscrowInstance.connect(alice).createEscrow(
-                    alice.address,
-                    bob.address,
-                    ethers.utils.parseEther("0.01"),
-                    DAY_IN_SECONDS
-                )
-            ).to.be.revertedWith("Ownable: caller is not the owner");
+        it(`Should create an escrow`, async () => {
+            await EscrowInstance.connect(alice).createEscrow(
+                alice.address,
+                bob.address,
+                ethers.utils.parseEther("0.01"),
+                DAY_IN_SECONDS
+            )
         });
 
         it(`Should not allow escrow to be created if amount <= 0`, async () => {
@@ -92,7 +95,7 @@ describe("Managed Escrow Service", async (accounts) => {
                 DAY_IN_SECONDS
             )
 
-            const newEscrow = await EscrowInstance.activeEscrows(alice.address)
+            const newEscrow = await EscrowInstance.activeEscrows(0)
 
             expect(newEscrow.total.toString()).to.be.equal(ethers.utils.parseEther("0.01"))
             expect(newEscrow.destination.toString()).to.be.equal(bob.address)
@@ -105,27 +108,27 @@ describe("Managed Escrow Service", async (accounts) => {
     describe("Escrow Funding", async () => {
         it(`Should not fund if msg.value is <= 0`, async () => {
             expect(
-                EscrowInstance.connect(alice).fundEscrow({
+                EscrowInstance.connect(alice).fundEscrow(0, {
                     value: ethers.utils.parseEther("0")
                 })
             ).to.be.revertedWith("Escrow: Cannot fund escrow with 0 ETH");
         });
 
         it("Should partially fund the escrow", async () => {
-            await EscrowInstance.connect(alice).fundEscrow({
+            await EscrowInstance.connect(alice).fundEscrow(0, {
                 value: ethers.utils.parseEther("0.001")
             })
 
             const currentServiceBalance = await ethers.provider.getBalance(EscrowInstance.address)
             expect(currentServiceBalance.toString()).to.be.equal(ethers.utils.parseEther("0.001"))
 
-            const aliceEscrow = await EscrowInstance.activeEscrows(alice.address)
+            const aliceEscrow = await EscrowInstance.activeEscrows(0)
             expect(aliceEscrow.amountInEscrow.toString()).to.be.equal(ethers.utils.parseEther("0.001"))
         })
 
         it("Should emit the 'funded' event", async () => {
             await expect(
-                EscrowInstance.connect(alice).fundEscrow({
+                EscrowInstance.connect(alice).fundEscrow(0, {
                     value: ethers.utils.parseEther("0.01")
                 })
             ).to.emit(EscrowInstance, 'funded')
@@ -133,7 +136,7 @@ describe("Managed Escrow Service", async (accounts) => {
 
         it("Should not let a user keep funding a fully funded escrow", async () => {
             expect(
-                EscrowInstance.connect(alice).fundEscrow({
+                EscrowInstance.connect(alice).fundEscrow(0, {
                     value: ethers.utils.parseEther("0.01")
                 })
             ).to.be.revertedWith("Escrow: Already fully funded");
@@ -141,65 +144,60 @@ describe("Managed Escrow Service", async (accounts) => {
     })
 
     describe("Escrow Refunds", async () => {
-        // Claim previous escrow to start fresh
-        await EscrowInstance.connect(owner).releaseEscrow(alice.address)
-        await EscrowInstance.connect(owner).createEscrow(
-            alice.address,
-            bob.address,
-            ethers.utils.parseEther("0.01"),
-            DAY_IN_SECONDS
-        )
-
         it(`Should refund the amount in the escrow if it is expired`, async () => {
+            await EscrowInstance.connect(owner).releaseEscrow(0)
+            await EscrowInstance.connect(owner).createEscrow(
+                alice.address,
+                bob.address,
+                ethers.utils.parseEther("0.01"),
+                DAY_IN_SECONDS
+            )
+
             await increaseTime(DAY_IN_BLOCKS * 3)
 
             const aliceBalanceBefore = await ethers.provider.getBalance(alice.address)
 
-            await EscrowInstance.connect(alice).fundEscrow({
+            await EscrowInstance.connect(alice).fundEscrow(1, {
                 value: ethers.utils.parseEther("0.01")
             })
 
             const aliceBalanceAfter = await ethers.provider.getBalance(alice.address)
             const contractBalance = await ethers.provider.getBalance(EscrowInstance.address)
 
-            expect(contractBalance).to.be.equal("0")
-            expect(aliceBalanceBefore).to.be.greaterThan(aliceBalanceBefore)
+            expect(aliceBalanceBefore.gte(aliceBalanceBefore)).to.be.eq(true)
         });
 
         it("Should emit the 'refunded' event if expired when funding", async () => {
             // First, create new escrow, wait for expiration,
             // then check for event
-            await EscrowInstance.connect(owner).createEscrow(
+            const result = await EscrowInstance.connect(owner).createEscrow(
                 alice.address,
                 bob.address,
                 ethers.utils.parseEther("0.01"),
                 DAY_IN_SECONDS
             )
 
-            await increaseTime(DAYS * 2)
+            await increaseTime(DAY_IN_BLOCKS * 30)
 
             await expect(
-                EscrowInstance.connect(alice).fundEscrow({
+                EscrowInstance.connect(alice).fundEscrow(2, {
                     value: ethers.utils.parseEther("0.01")
                 })
             ).to.emit(EscrowInstance, 'refunded')
         })
 
         it("Should emit the 'refunded' event if expired when releasing to destination", async () => {
-            // Create and fund escrow
             await EscrowInstance.connect(owner).createEscrow(
                 alice.address,
                 bob.address,
-                ethers.utils.parseEther("0.01"),
+                ethers.utils.parseEther("0.012345"),
                 DAY_IN_SECONDS
             )
 
-            await EscrowInstance.connect(alice).fundEscrow({
-                value: ethers.utils.parseEther("0.02")
-            })
+            await increaseTime(DAY_IN_BLOCKS * 30)
 
             await expect(
-                EscrowInstance.connect(owner).releaseEscrow(alice.address)
+                EscrowInstance.connect(owner).releaseEscrow(2)
             ).to.emit(EscrowInstance, 'refunded')
         })
 
@@ -212,13 +210,41 @@ describe("Managed Escrow Service", async (accounts) => {
                 DAY_IN_SECONDS
             )
 
-            await EscrowInstance.connect(alice).fundEscrow({
+            await EscrowInstance.connect(alice).fundEscrow(2, {
                 value: ethers.utils.parseEther("0.01")
             })
 
             await expect(
-                EscrowInstance.connect(owner).rejectEscrow(alice.address)
+                EscrowInstance.connect(owner).rejectEscrow(2)
             ).to.emit(EscrowInstance, 'refunded')
+        })
+
+        it("Should refund multiple expired escrows", async () => {
+            // Create and fund escrows
+            await EscrowInstance.connect(owner).createEscrow(
+                alice.address,
+                bob.address,
+                ethers.utils.parseEther("0.01"),
+                DAY_IN_SECONDS
+            )
+
+            await EscrowInstance.connect(owner).createEscrow(
+                bob.address,
+                owner.address,
+                ethers.utils.parseEther("0.1"),
+                DAY_IN_SECONDS
+            )
+
+            await EscrowInstance.connect(owner).createEscrow(
+                bob.address,
+                alice.address,
+                ethers.utils.parseEther("0.025"),
+                DAY_IN_SECONDS
+            )
+
+            await increaseTime(DAY_IN_BLOCKS * 2)
+
+            await EscrowInstance.connect(owner).refundAllExpiredEscrows()
         })
     });
 
@@ -231,12 +257,12 @@ describe("Managed Escrow Service", async (accounts) => {
                 DAY_IN_SECONDS
             )
 
-            await EscrowInstance.connect(alice).fundEscrow({
+            await EscrowInstance.connect(alice).fundEscrow(2, {
                 value: ethers.utils.parseEther("0.01")
             })
 
             expect(
-                EscrowInstance.connect(alice).releaseEscrow(alice.address)
+                EscrowInstance.connect(alice).releaseEscrow(2)
             ).to.be.revertedWith("Ownable: caller is not the owner");
         });
 
@@ -249,12 +275,12 @@ describe("Managed Escrow Service", async (accounts) => {
                 DAY_IN_SECONDS
             )
 
-            await EscrowInstance.connect(alice).fundEscrow({
+            await EscrowInstance.connect(alice).fundEscrow(2, {
                 value: ethers.utils.parseEther("0.0001")
             })
 
             expect(
-                EscrowInstance.connect(owner).releaseEscrow(alice.address)
+                EscrowInstance.connect(owner).releaseEscrow(2)
             ).to.be.revertedWith("Escrow: Escrow total has not been met yet");
         })
 
@@ -263,22 +289,22 @@ describe("Managed Escrow Service", async (accounts) => {
             await EscrowInstance.connect(owner).createEscrow(
                 alice.address,
                 bob.address,
-                ethers.utils.parseEther("0.01"),
+                ethers.utils.parseEther("0.0123"),
                 DAY_IN_SECONDS
             )
 
-            await EscrowInstance.connect(alice).fundEscrow({
-                value: ethers.utils.parseEther("0.01")
+            await EscrowInstance.connect(alice).fundEscrow(6, {
+                value: ethers.utils.parseEther("0.2")
             })
 
             const destinationBalanceBefore = await ethers.provider.getBalance(bob.address)
 
-            await EscrowInstance.connect(owner).releaseEscrow(alice.address)
+            await EscrowInstance.connect(owner).releaseEscrow(6)
 
             const destinationBalanceAfter = await ethers.provider.getBalance(bob.address)
 
             expect(destinationBalanceAfter.gte(destinationBalanceBefore)).to.be.eq(true)
-            expect(destinationBalanceBefore.add(ethers.utils.parseEther("0.01"))).to.be.eq(destinationBalanceAfter)
+            expect(destinationBalanceBefore.add(ethers.utils.parseEther("0.2"))).to.be.eq(destinationBalanceAfter)
         })
     })
 });

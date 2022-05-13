@@ -17,10 +17,13 @@ app.use(helmet())
 
 const API = require("./API")
 
-app.get("/escrow/:address", API.Escrow.getEscrow)
-app.get("/test", (req, res) => res.sendStatus(200))
+app.get("/escrow/:index", API.Escrow.getEscrow)
 
 app.post("/escrow", API.Escrow.createEscrow)
+app.post("/escrow/fund", API.Escrow.fundEscrow)
+app.post("/escrow/release", API.Escrow.releaseEscrow)
+app.post("/escrow/reject", API.Escrow.rejectEscrow)
+app.post("/escrow/refundExpired", API.Escrow.refundAllExpired)
 
 const PORT = process.env.PORT || 3001
 app.listen(PORT, () => console.log(`Server listening on port ${PORT}`))
